@@ -15,7 +15,7 @@ import {
   createBskRunner,
 } from "../src/runner";
 import { SessionRegistry } from "../src/sessions";
-import type { PluginConfig } from "../src/tools";
+import type { PluginConfig, ToolDeps } from "../src/tools";
 
 const CONFIG: PluginConfig = {
   bskPath: "bsk",
@@ -2030,5 +2030,119 @@ describe("website debug", () => {
         tools.get("browser_inspect")!.execute({ action: "debug", ...args }, makeExec()),
       ).rejects.toThrow();
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("registerBrowserTools: a name already owned in the shared tool scope", () => {
+  const ALL_TOOLS = [
+    "browser_session",
+    "browser_page",
+    "browser_inspect",
+    "browser_interact",
+    "browser_tabs",
+    "browser_assist",
+  ];
+
+  function depsWithRegister(register: (def: ToolDefinition) => unknown): ToolDeps {
+    const registry = new SessionRegistry(CONFIG.maxSessions);
+    const { runner } = fakeRunner({});
+    const ctx = { tools: { register }, get: () => undefined };
+    return {
+      ctx: ctx as never,
+      runner: runner as BskRunner,
+      registry,
+      config: { ...CONFIG },
+      observation: disabledObservation({ ctx, runner: runner as BskRunner, registry }),
+      queue: new KeyedExecutor(),
+    };
+  }
+
+  /** Collect console.warn output without leaking a spy into the other suites. */
+  function captureWarnings<T>(run: () => T): { result: T; warnings: string[] } {
+    const warnings: string[] = [];
+    const original = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map((arg) => String(arg)).join(" "));
+    };
+    try {
+      return { result: run(), warnings };
+    } finally {
+      console.warn = original;
+    }
+  }
+
+  it("registers every tool whose name is still free", () => {
+    // `browser_session` is spec 0, so the old `.map()` aborted before any of
+    // the other five were even attempted (#444).
+    const owned = new Set(["browser_session"]);
+    const registered: string[] = [];
+    const { warnings } = captureWarnings(() =>
+      registerBrowserTools(
+        depsWithRegister((def) => {
+          if (owned.has(def.name)) throw new Error(`"${def.name}" is already registered`);
+          registered.push(def.name);
+          return () => {};
+        }),
+      ),
+    );
+    expect(registered).toEqual(ALL_TOOLS.filter((name) => name !== "browser_session"));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("browser_session");
+    expect(warnings[0]).toContain("1 of 6");
+  });
+
+  it("reports each conflict by tool name instead of failing silently", () => {
+    const owned = new Set(["browser_tabs", "browser_assist"]);
+    const registered: string[] = [];
+    const { warnings } = captureWarnings(() =>
+      registerBrowserTools(
+        depsWithRegister((def) => {
+          if (owned.has(def.name)) throw new Error("duplicate");
+          registered.push(def.name);
+          return () => {};
+        }),
+      ),
+    );
+    expect(registered).toEqual(ALL_TOOLS.filter((name) => !owned.has(name)));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("browser_tabs");
+    expect(warnings[0]).toContain("browser_assist");
+    expect(warnings[0]).toContain("2 of 6");
+  });
+
+  it("still disposes the tools that did register", () => {
+    // With the old all-or-nothing map the disposers of the first four specs
+    // were dropped with the abort, so an unload could not release them.
+    const owned = new Set(["browser_tabs"]);
+    const disposed: string[] = [];
+    const { result: dispose } = captureWarnings(() =>
+      registerBrowserTools(
+        depsWithRegister((def) => {
+          if (owned.has(def.name)) throw new Error("duplicate");
+          return () => {
+            disposed.push(def.name);
+          };
+        }),
+      ),
+    );
+    dispose();
+    expect(disposed).toEqual(ALL_TOOLS.filter((name) => !owned.has(name)));
+  });
+
+  it("throws with every name when nothing could register", () => {
+    const registered: string[] = [];
+    const { warnings } = captureWarnings(() => {
+      expect(() =>
+        registerBrowserTools(
+          depsWithRegister((def) => {
+            registered.push(def.name);
+            throw new Error("duplicate");
+          }),
+        ),
+      ).toThrow(/browser_session.*browser_assist/s);
+    });
+    expect(registered).toEqual(ALL_TOOLS);
+    // Nothing survived, so the message is the only diagnostic — no warn.
+    expect(warnings).toHaveLength(0);
   });
 });

@@ -391,12 +391,42 @@ function indexOperations(definitions: ToolDefinition[]): ReadonlyMap<string, Too
   return indexed;
 }
 
-/** Register the complete six-tool browser suite; returns its combined disposer. */
+/**
+ * Register the complete six-tool browser suite; returns its combined disposer.
+ *
+ * The specs are registered one by one on purpose. The host tool registry
+ * rejects a duplicate name by throwing, and a plain `.map()` over the specs
+ * aborts at the first rejection: the disposers of the tools that DID register
+ * are lost with the pending entries, and a collision on `browser_session`
+ * (the first spec) leaves the plugin with zero usable tools. The only trace
+ * was a `console.warn` inside `armLazyTools`, which an Electron desktop host
+ * never shows — the plugin looked healthy while exposing nothing (#444).
+ *
+ * Registering per spec keeps every non-colliding tool available, keeps the
+ * disposers of those tools, and reports each conflict with the offending tool
+ * name. When nothing registered we still throw, so `armLazyTools` keeps its
+ * existing "retry at the next lifecycle boundary" behaviour.
+ */
 export function registerBrowserTools(deps: ToolDeps): () => void {
   const definitions = indexOperations(createBrowserOperationDefinitions(deps));
-  const disposers = BROWSER_TOOL_SPECS.map((spec) =>
-    deps.ctx.tools.register(defineBrowserTool(spec, definitions)),
-  ).filter((dispose): dispose is () => void => typeof dispose === "function");
+  const disposers: (() => void)[] = [];
+  const failures: string[] = [];
+  for (const spec of BROWSER_TOOL_SPECS) {
+    try {
+      const dispose = deps.ctx.tools.register(defineBrowserTool(spec, definitions));
+      if (typeof dispose === "function") disposers.push(dispose);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      failures.push(`${spec.name} (${detail})`);
+    }
+  }
+  if (failures.length > 0) {
+    const summary =
+      `[dsh-plugin-browserskill] ${failures.length} of ${BROWSER_TOOL_SPECS.length} browser tools ` +
+      `failed to register — another tool already owns the name in this scope: ${failures.join(", ")}`;
+    if (disposers.length === 0) throw new Error(summary);
+    console.warn(`${summary}; the remaining ${disposers.length} tool(s) are active`);
+  }
   return () => {
     for (const dispose of disposers.splice(0)) dispose();
   };

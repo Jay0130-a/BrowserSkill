@@ -9,6 +9,14 @@ Starting from 0.2.0, CLI / Extension / DSH Plugin share the same version number.
 
 ### Fixed
 
+- DSH Plugin: a `browser_*` name that another tool already owns in the shared tool
+  scope no longer takes the whole suite down with it. `registerBrowserTools`
+  registers the six specs one by one, so a collision on `browser_session` (spec 0)
+  no longer aborts before the other five are even attempted, the disposers of the
+  tools that did register are kept instead of being dropped with the abort, and
+  each conflict is reported by tool name rather than only through a `console.warn`
+  that an Electron desktop host never shows
+  ([#444](https://github.com/Tencent/BrowserSkill/issues/444)).
 - Extension: input to a background Agent Window tab no longer keeps failing with
   `input_not_ready` after Chrome drops the session's focus override without a detach
   ([#355](https://github.com/Tencent/BrowserSkill/issues/355)). The session's
